@@ -9,171 +9,137 @@ dotenv.config();
 app.use(cors());
 app.use(express.json());
 
-// Initialize Solana connection
-const connection = new web3.Connection(process.env.SOLANA_RPC_URL, 'confirmed');
-
-async function getBirdeyeData(address) {
-  try {
-    const response = await fetch(
-      `https://public-api.birdeye.so/public/token_list?address=${address}`,
-      {
-        headers: {
-          'X-API-KEY': process.env.BIRDEYE_API_KEY
-        }
-      }
-    );
-    return await response.json();
-  } catch (error) {
-    console.error('Birdeye API error:', error);
-    return null;
-  }
-}
-
-async function getHeliusData(address) {
-  try {
-    const response = await fetch(
-      `https://api.helius.xyz/v0/token-metadata?api-key=${process.env.HELIUS_API_KEY}&query=${address}`
-    );
-    return await response.json();
-  } catch (error) {
-    console.error('Helius API error:', error);
-    return null;
-  }
-}
-
-// Calculate metrics based on real data
-async function calculateMetrics(address, birdeyeData, heliusData) {
-  try {
-    const liquidityScore = calculateLiquidityScore(birdeyeData);
-    const holderScore = calculateHolderScore(birdeyeData);
-    const volumeScore = calculateVolumeScore(birdeyeData);
-    const socialScore = await calculateSocialScore(heliusData);
-    const securityScore = calculateSecurityScore(heliusData);
-
-    // Calculate overall score
-    const scores = [liquidityScore, holderScore, volumeScore, socialScore, securityScore];
-    const overallScore = Math.round(scores.reduce((a, b) => a + b, 0) / scores.length);
-
-    return {
-      score: overallScore,
-      metrics: {
-        liquidityDepth: {
-          score: liquidityScore,
-          description: getLiquidityDescription(liquidityScore)
-        },
-        holderDistribution: {
-          score: holderScore,
-          description: getHolderDescription(holderScore)
-        },
-        volumeMomentum: {
-          score: volumeScore,
-          description: getVolumeDescription(volumeScore)
-        },
-        socialMetrics: {
-          score: socialScore,
-          description: getSocialDescription(socialScore)
-        },
-        securityAnalysis: {
-          score: securityScore,
-          description: getSecurityDescription(securityScore)
-        }
-      }
-    };
-  } catch (error) {
-    console.error('Error calculating metrics:', error);
-    throw error;
-  }
-}
-
-// Individual metric calculations
-function calculateLiquidityScore(birdeyeData) {
-  if (!birdeyeData || !birdeyeData.data) return 50;
-  const liquidity = birdeyeData.data.liquidity || 0;
-  return Math.min(Math.round((liquidity / 10000) * 100), 100); // Adjust threshold as needed
-}
-
-function calculateHolderScore(birdeyeData) {
-  if (!birdeyeData || !birdeyeData.data) return 50;
-  const holders = birdeyeData.data.holders || 0;
-  return Math.min(Math.round((holders / 1000) * 100), 100); // Adjust threshold as needed
-}
-
-function calculateVolumeScore(birdeyeData) {
-  if (!birdeyeData || !birdeyeData.data) return 50;
-  const volume = birdeyeData.data.volume24h || 0;
-  return Math.min(Math.round((volume / 10000) * 100), 100); // Adjust threshold as needed
-}
-
-async function calculateSocialScore(heliusData) {
-  // Implement social metrics calculation based on Helius data
-  return 75; // Placeholder
-}
-
-function calculateSecurityScore(heliusData) {
-  // Implement security analysis based on Helius data
-  return 80; // Placeholder
-}
-
-// Description generators
-function getLiquidityDescription(score) {
-  if (score >= 80) return "Strong liquidity pools with healthy depth";
-  if (score >= 60) return "Moderate liquidity, could be improved";
-  return "Low liquidity, exercise caution";
-}
-
-function getHolderDescription(score) {
-  if (score >= 80) return "Well distributed among many holders";
-  if (score >= 60) return "Decent holder distribution";
-  return "Concentrated among few holders";
-}
-
-function getVolumeDescription(score) {
-  if (score >= 80) return "Strong trading volume with good momentum";
-  if (score >= 60) return "Moderate trading activity";
-  return "Low trading volume";
-}
-
-function getSocialDescription(score) {
-  if (score >= 80) return "Active community with strong engagement";
-  if (score >= 60) return "Growing community presence";
-  return "Limited social activity";
-}
-
-function getSecurityDescription(score) {
-  if (score >= 80) return "High security standards detected";
-  if (score >= 60) return "Acceptable security measures";
-  return "Security concerns detected";
-}
-
-// Main analysis endpoint
-app.post('/analyze', async (req, res) => {
-  try {
-    const { address } = req.body;
-    
-    // Validate Solana address
+async function fetchBirdeyeTokenData(address) {
     try {
-      new web3.PublicKey(address);
+        const response = await fetch(`https://public-api.birdeye.so/public/token?address=${address}`, {
+            headers: {
+                'X-API-KEY': process.env.BIRDEYE_API_KEY
+            }
+        });
+        const data = await response.json();
+        console.log('Birdeye Data:', data);  // Debug log
+        return data;
     } catch (error) {
-      return res.status(400).json({ error: 'Invalid Solana address' });
+        console.error('Birdeye API Error:', error);
+        return null;
     }
+}
 
-    // Fetch data from APIs
-    const [birdeyeData, heliusData] = await Promise.all([
-      getBirdeyeData(address),
-      getHeliusData(address)
-    ]);
+async function fetchHeliusTokenData(address) {
+    try {
+        const response = await fetch(
+            `https://api.helius.xyz/v0/token-metadata?api-key=${process.env.HELIUS_API_KEY}&query=${address}`
+        );
+        const data = await response.json();
+        console.log('Helius Data:', data);  // Debug log
+        return data;
+    } catch (error) {
+        console.error('Helius API Error:', error);
+        return null;
+    }
+}
 
-    // Calculate metrics
-    const analysis = await calculateMetrics(address, birdeyeData, heliusData);
-    res.json(analysis);
+function calculateLiquidityScore(tokenData) {
+    if (!tokenData || !tokenData.liquidity) return 50;
+    const liquidity = parseFloat(tokenData.liquidity);
+    // Score based on liquidity depth
+    if (liquidity > 1000000) return 90;
+    if (liquidity > 100000) return 80;
+    if (liquidity > 10000) return 70;
+    if (liquidity > 1000) return 60;
+    return 50;
+}
 
-  } catch (error) {
-    console.error('Analysis error:', error);
-    res.status(500).json({ error: error.message });
-  }
+function calculateVolumeScore(tokenData) {
+    if (!tokenData || !tokenData.volume24h) return 50;
+    const volume = parseFloat(tokenData.volume24h);
+    // Score based on 24h volume
+    if (volume > 1000000) return 90;
+    if (volume > 100000) return 80;
+    if (volume > 10000) return 70;
+    if (volume > 1000) return 60;
+    return 50;
+}
+
+function calculateHolderScore(tokenData) {
+    if (!tokenData || !tokenData.holders) return 50;
+    const holders = parseInt(tokenData.holders);
+    // Score based on number of holders
+    if (holders > 10000) return 90;
+    if (holders > 1000) return 80;
+    if (holders > 100) return 70;
+    if (holders > 10) return 60;
+    return 50;
+}
+
+app.post('/analyze', async (req, res) => {
+    try {
+        const { address } = req.body;
+        console.log('Analyzing address:', address);  // Debug log
+
+        // Validate Solana address
+        try {
+            new web3.PublicKey(address);
+        } catch (error) {
+            return res.status(400).json({ error: 'Invalid Solana address' });
+        }
+
+        // Fetch token data from APIs
+        const [birdeyeData, heliusData] = await Promise.all([
+            fetchBirdeyeTokenData(address),
+            fetchHeliusTokenData(address)
+        ]);
+
+        // Calculate individual scores
+        const liquidityScore = calculateLiquidityScore(birdeyeData);
+        const volumeScore = calculateVolumeScore(birdeyeData);
+        const holderScore = calculateHolderScore(birdeyeData);
+        
+        // Calculate social and security scores based on available data
+        const socialScore = heliusData ? 75 : 50;  // Placeholder
+        const securityScore = heliusData ? 80 : 50;  // Placeholder
+
+        // Calculate overall score
+        const overallScore = Math.round(
+            (liquidityScore + volumeScore + holderScore + socialScore + securityScore) / 5
+        );
+
+        const analysis = {
+            score: overallScore,
+            metrics: {
+                liquidityDepth: {
+                    score: liquidityScore,
+                    description: `Liquidity analysis based on pool depth and distribution`
+                },
+                holderDistribution: {
+                    score: holderScore,
+                    description: `Analysis of holder distribution and concentration`
+                },
+                volumeMomentum: {
+                    score: volumeScore,
+                    description: `24h volume analysis and trading patterns`
+                },
+                socialMetrics: {
+                    score: socialScore,
+                    description: `Community engagement and social presence`
+                },
+                securityAnalysis: {
+                    score: securityScore,
+                    description: `Contract security and risk assessment`
+                }
+            }
+        };
+
+        console.log('Analysis result:', analysis);  // Debug log
+        res.json(analysis);
+
+    } catch (error) {
+        console.error('Server error:', error);
+        res.status(500).json({ error: 'Error analyzing token' });
+    }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
