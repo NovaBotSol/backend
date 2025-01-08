@@ -12,17 +12,18 @@ app.use(express.json());
 async function fetchBirdeyeTokenData(address) {
     try {
         console.log('Fetching Birdeye data for:', address);
-        // First, get token data
-        const tokenResponse = await fetch(`https://public-api.birdeye.so/public/token_list/all?offset=0&limit=1&sort_by=v24h&sort_type=desc`, {
+        
+        // Get market data
+        const marketResponse = await fetch(`https://public-api.birdeye.so/public/market_info?address=${address}`, {
             headers: {
                 'X-API-KEY': process.env.BIRDEYE_API_KEY
             }
         });
-        const tokenData = await tokenResponse.json();
-        console.log('Birdeye Token Data:', tokenData);
+        const marketData = await marketResponse.json();
+        console.log('Birdeye Market Data:', marketData);
 
-        // Then get volume data
-        const volumeResponse = await fetch(`https://public-api.birdeye.so/public/stats_history/volume?address=${address}&type=24h&limit=2`, {
+        // Get volume data
+        const volumeResponse = await fetch(`https://public-api.birdeye.so/public/market/top_tokens?offset=0&limit=1&chain=solana&orderBy=volume&ordering=desc&address=${address}`, {
             headers: {
                 'X-API-KEY': process.env.BIRDEYE_API_KEY
             }
@@ -30,14 +31,23 @@ async function fetchBirdeyeTokenData(address) {
         const volumeData = await volumeResponse.json();
         console.log('Birdeye Volume Data:', volumeData);
 
+        // Get holder data
+        const holderResponse = await fetch(`https://public-api.birdeye.so/public/token/holders?address=${address}`, {
+            headers: {
+                'X-API-KEY': process.env.BIRDEYE_API_KEY
+            }
+        });
+        const holderData = await holderResponse.json();
+        console.log('Birdeye Holder Data:', holderData);
+
         return {
             success: true,
             data: {
-                token: tokenData.data?.[0] || {},
-                volume: volumeData.data || {},
-                liquidity: tokenData.data?.[0]?.liquidity || 0,
-                holders: tokenData.data?.[0]?.holder || 0,
-                volume24h: volumeData.data?.[0]?.value || 0
+                market: marketData.data || {},
+                volume: volumeData.data?.[0]?.volume24h || 0,
+                liquidity: marketData.data?.liquidity || 0,
+                holders: holderData.data?.total || 0,
+                price: marketData.data?.price || 0
             }
         };
     } catch (error) {
@@ -53,7 +63,17 @@ async function fetchHeliusTokenData(address) {
     try {
         console.log('Fetching Helius data for:', address);
         const response = await fetch(
-            `https://api.helius.xyz/v0/token-metadata?api-key=${process.env.HELIUS_API_KEY}&query=${address}`
+            `https://api.helius.xyz/v0/tokens/metadata?api-key=${process.env.HELIUS_API_KEY}`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    mintAccounts: [address],
+                    includeOffChain: true
+                })
+            }
         );
         const data = await response.json();
         console.log('Helius Raw Response:', data);
@@ -76,7 +96,7 @@ function calculateLiquidityScore(tokenData) {
 
 function calculateVolumeScore(tokenData) {
     console.log('Calculating volume score for:', tokenData);
-    const volume = tokenData?.data?.volume24h || 0;
+    const volume = tokenData?.data?.volume || 0;
     if (volume > 1000000) return 90;
     if (volume > 100000) return 80;
     if (volume > 10000) return 70;
@@ -92,6 +112,38 @@ function calculateHolderScore(tokenData) {
     if (holders > 100) return 70;
     if (holders > 10) return 60;
     return 50;
+}
+
+function calculateSocialScore(heliusData) {
+    const metadata = heliusData?.[0];
+    if (!metadata) return 50;
+    
+    let score = 50;
+    
+    // Check for social links and metadata completeness
+    if (metadata.offChainMetadata) {
+        const { description, image, externalUrl } = metadata.offChainMetadata;
+        if (description) score += 10;
+        if (image) score += 10;
+        if (externalUrl) score += 10;
+    }
+    
+    return Math.min(score, 100);
+}
+
+function calculateSecurityScore(tokenData, heliusData) {
+    let score = 50;
+    
+    // Check market data
+    if (tokenData?.data?.market?.price > 0) score += 10;
+    if (tokenData?.data?.liquidity > 1000) score += 10;
+    
+    // Check metadata
+    if (heliusData?.[0]?.onChainMetadata) {
+        score += 20;
+    }
+    
+    return Math.min(score, 100);
 }
 
 app.get('/test-config', async (req, res) => {
@@ -128,18 +180,16 @@ app.post('/analyze', async (req, res) => {
         const liquidityScore = calculateLiquidityScore(birdeyeData);
         const volumeScore = calculateVolumeScore(birdeyeData);
         const holderScore = calculateHolderScore(birdeyeData);
-        
-        // Implement real metrics for these based on Helius data
-        const socialScore = heliusData?.tokens?.length > 0 ? 75 : 50;
-        const securityScore = heliusData?.tokens?.length > 0 ? 80 : 50;
+        const socialScore = calculateSocialScore(heliusData);
+        const securityScore = calculateSecurityScore(birdeyeData, heliusData);
 
         // Calculate overall score with weighted averages
         const overallScore = Math.round(
-            (liquidityScore * 0.3) + // 30% weight to liquidity
-            (volumeScore * 0.25) +   // 25% weight to volume
-            (holderScore * 0.25) +   // 25% weight to holders
-            (socialScore * 0.1) +    // 10% weight to social
-            (securityScore * 0.1)    // 10% weight to security
+            (liquidityScore * 0.3) +  // 30% weight to liquidity
+            (volumeScore * 0.25) +    // 25% weight to volume
+            (holderScore * 0.25) +    // 25% weight to holders
+            (socialScore * 0.1) +     // 10% weight to social
+            (securityScore * 0.1)     // 10% weight to security
         );
 
         const analysis = {
@@ -147,25 +197,26 @@ app.post('/analyze', async (req, res) => {
             metrics: {
                 liquidityDepth: {
                     score: liquidityScore,
-                    description: `Liquidity depth: ${birdeyeData?.data?.liquidity || 0} USD`
+                    description: `Liquidity depth: $${(birdeyeData?.data?.liquidity || 0).toLocaleString()}`
                 },
                 holderDistribution: {
                     score: holderScore,
-                    description: `Total holders: ${birdeyeData?.data?.holders || 0}`
+                    description: `Total holders: ${(birdeyeData?.data?.holders || 0).toLocaleString()}`
                 },
                 volumeMomentum: {
                     score: volumeScore,
-                    description: `24h volume: ${birdeyeData?.data?.volume24h || 0} USD`
+                    description: `24h volume: $${(birdeyeData?.data?.volume || 0).toLocaleString()}`
                 },
                 socialMetrics: {
                     score: socialScore,
-                    description: `Community engagement and social presence`
+                    description: `Social presence and metadata quality`
                 },
                 securityAnalysis: {
                     score: securityScore,
-                    description: `Contract security and risk assessment`
+                    description: `Contract security and market stability`
                 }
-            }
+            },
+            priceUSD: birdeyeData?.data?.price || 0
         };
 
         console.log('Sending analysis:', analysis);
