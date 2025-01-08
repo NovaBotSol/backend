@@ -12,18 +12,40 @@ app.use(express.json());
 async function fetchBirdeyeTokenData(address) {
     try {
         console.log('Fetching Birdeye data for:', address);
-        const response = await fetch(`https://public-api.birdeye.so/public/token?address=${address}`, {
+        // First, get token data
+        const tokenResponse = await fetch(`https://public-api.birdeye.so/public/token_list/all?offset=0&limit=1&sort_by=v24h&sort_type=desc`, {
             headers: {
-                'X-API-KEY': process.env.BIRDEYE_API_KEY,
-                'Accept': 'application/json'
+                'X-API-KEY': process.env.BIRDEYE_API_KEY
             }
         });
-        const data = await response.json();
-        console.log('Birdeye Raw Response:', JSON.stringify(data, null, 2));
-        return data;
+        const tokenData = await tokenResponse.json();
+        console.log('Birdeye Token Data:', tokenData);
+
+        // Then get volume data
+        const volumeResponse = await fetch(`https://public-api.birdeye.so/public/stats_history/volume?address=${address}&type=24h&limit=2`, {
+            headers: {
+                'X-API-KEY': process.env.BIRDEYE_API_KEY
+            }
+        });
+        const volumeData = await volumeResponse.json();
+        console.log('Birdeye Volume Data:', volumeData);
+
+        return {
+            success: true,
+            data: {
+                token: tokenData.data?.[0] || {},
+                volume: volumeData.data || {},
+                liquidity: tokenData.data?.[0]?.liquidity || 0,
+                holders: tokenData.data?.[0]?.holder || 0,
+                volume24h: volumeData.data?.[0]?.value || 0
+            }
+        };
     } catch (error) {
         console.error('Birdeye API Error:', error);
-        return null;
+        return {
+            success: false,
+            error: error.message
+        };
     }
 }
 
@@ -31,10 +53,10 @@ async function fetchHeliusTokenData(address) {
     try {
         console.log('Fetching Helius data for:', address);
         const response = await fetch(
-            `https://api.helius.xyz/v0/addresses/${address}/balances?api-key=${process.env.HELIUS_API_KEY}`
+            `https://api.helius.xyz/v0/token-metadata?api-key=${process.env.HELIUS_API_KEY}&query=${address}`
         );
         const data = await response.json();
-        console.log('Helius Raw Response:', JSON.stringify(data, null, 2));
+        console.log('Helius Raw Response:', data);
         return data;
     } catch (error) {
         console.error('Helius API Error:', error);
@@ -43,9 +65,8 @@ async function fetchHeliusTokenData(address) {
 }
 
 function calculateLiquidityScore(tokenData) {
-    console.log('Calculating liquidity score for:', JSON.stringify(tokenData, null, 2));
-    if (!tokenData || !tokenData.data || !tokenData.data.liquidity) return 50;
-    const liquidity = parseFloat(tokenData.data.liquidity);
+    console.log('Calculating liquidity score for:', tokenData);
+    const liquidity = tokenData?.data?.liquidity || 0;
     if (liquidity > 1000000) return 90;
     if (liquidity > 100000) return 80;
     if (liquidity > 10000) return 70;
@@ -54,9 +75,8 @@ function calculateLiquidityScore(tokenData) {
 }
 
 function calculateVolumeScore(tokenData) {
-    console.log('Calculating volume score for:', JSON.stringify(tokenData, null, 2));
-    if (!tokenData || !tokenData.data || !tokenData.data.volume24h) return 50;
-    const volume = parseFloat(tokenData.data.volume24h);
+    console.log('Calculating volume score for:', tokenData);
+    const volume = tokenData?.data?.volume24h || 0;
     if (volume > 1000000) return 90;
     if (volume > 100000) return 80;
     if (volume > 10000) return 70;
@@ -65,9 +85,8 @@ function calculateVolumeScore(tokenData) {
 }
 
 function calculateHolderScore(tokenData) {
-    console.log('Calculating holder score for:', JSON.stringify(tokenData, null, 2));
-    if (!tokenData || !tokenData.data || !tokenData.data.holders) return 50;
-    const holders = parseInt(tokenData.data.holders);
+    console.log('Calculating holder score for:', tokenData);
+    const holders = tokenData?.data?.holders || 0;
     if (holders > 10000) return 90;
     if (holders > 1000) return 80;
     if (holders > 100) return 70;
@@ -98,23 +117,29 @@ app.post('/analyze', async (req, res) => {
         }
 
         // Fetch token data from APIs
-        const birdeyeData = await fetchBirdeyeTokenData(address);
-        console.log('Birdeye Data Structure:', JSON.stringify(birdeyeData, null, 2));
-        
-        const heliusData = await fetchHeliusTokenData(address);
-        console.log('Helius Data Structure:', JSON.stringify(heliusData, null, 2));
+        const [birdeyeData, heliusData] = await Promise.all([
+            fetchBirdeyeTokenData(address),
+            fetchHeliusTokenData(address)
+        ]);
+
+        console.log('Full API Data:', { birdeyeData, heliusData });
 
         // Calculate individual scores
         const liquidityScore = calculateLiquidityScore(birdeyeData);
         const volumeScore = calculateVolumeScore(birdeyeData);
         const holderScore = calculateHolderScore(birdeyeData);
         
-        const socialScore = heliusData ? 75 : 50;
-        const securityScore = heliusData ? 80 : 50;
+        // Implement real metrics for these based on Helius data
+        const socialScore = heliusData?.tokens?.length > 0 ? 75 : 50;
+        const securityScore = heliusData?.tokens?.length > 0 ? 80 : 50;
 
-        // Calculate overall score
+        // Calculate overall score with weighted averages
         const overallScore = Math.round(
-            (liquidityScore + volumeScore + holderScore + socialScore + securityScore) / 5
+            (liquidityScore * 0.3) + // 30% weight to liquidity
+            (volumeScore * 0.25) +   // 25% weight to volume
+            (holderScore * 0.25) +   // 25% weight to holders
+            (socialScore * 0.1) +    // 10% weight to social
+            (securityScore * 0.1)    // 10% weight to security
         );
 
         const analysis = {
@@ -122,15 +147,15 @@ app.post('/analyze', async (req, res) => {
             metrics: {
                 liquidityDepth: {
                     score: liquidityScore,
-                    description: `Liquidity analysis based on pool depth and distribution`
+                    description: `Liquidity depth: ${birdeyeData?.data?.liquidity || 0} USD`
                 },
                 holderDistribution: {
                     score: holderScore,
-                    description: `Analysis of holder distribution and concentration`
+                    description: `Total holders: ${birdeyeData?.data?.holders || 0}`
                 },
                 volumeMomentum: {
                     score: volumeScore,
-                    description: `24h volume analysis and trading patterns`
+                    description: `24h volume: ${birdeyeData?.data?.volume24h || 0} USD`
                 },
                 socialMetrics: {
                     score: socialScore,
@@ -143,7 +168,7 @@ app.post('/analyze', async (req, res) => {
             }
         };
 
-        console.log('Sending analysis:', JSON.stringify(analysis, null, 2));
+        console.log('Sending analysis:', analysis);
         res.json(analysis);
 
     } catch (error) {
