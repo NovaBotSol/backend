@@ -12,56 +12,57 @@ app.use(express.json());
 async function fetchBirdeyeTokenData(address) {
     try {
         console.log('Fetching Birdeye data for:', address);
-        
-        // Get all pools for the token
-        const poolsResponse = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${address}`, {
-            headers: {
-                'Accept': 'application/json'
+
+        // Get price data
+        const response = await fetch(
+            `https://public-api.birdeye.so/public/price?address=${address}`,
+            {
+                headers: {
+                    'x-api-key': process.env.BIRDEYE_API_KEY,
+                }
             }
-        });
-        const poolsData = await poolsResponse.json();
-        console.log('DexScreener Pools Data:', poolsData);
+        );
+        const priceData = await response.json();
+        console.log('Birdeye Price Data:', priceData);
 
-        // Get token metadata
-        const metaResponse = await fetch(`https://api.dexscreener.com/latest/dex/meta/solana/${address}`, {
-            headers: {
-                'Accept': 'application/json'
+        // Get liquidity and volume data
+        const volumeResponse = await fetch(
+            `https://public-api.birdeye.so/public/pool_summary?token_address=${address}`,
+            {
+                headers: {
+                    'x-api-key': process.env.BIRDEYE_API_KEY,
+                }
             }
-        });
-        const metaData = await metaResponse.json();
-        console.log('DexScreener Meta Data:', metaData);
+        );
+        const volumeData = await volumeResponse.json();
+        console.log('Birdeye Volume Data:', volumeData);
 
-        // Calculate total liquidity and volume from all pools
-        let totalLiquidity = 0;
-        let totalVolume = 0;
-        let holders = 0;
-        let price = 0;
-
-        if (poolsData.pairs && poolsData.pairs.length > 0) {
-            poolsData.pairs.forEach(pair => {
-                totalLiquidity += parseFloat(pair.liquidity?.usd || 0);
-                totalVolume += parseFloat(pair.volume?.h24 || 0);
-                price = parseFloat(pair.priceUsd || 0);
-            });
-
-            // If there's token metadata, use it
-            if (metaData.pairs && metaData.pairs.length > 0) {
-                holders = parseInt(metaData.pairs[0].holders || 0);
+        // Get holder data
+        const holderResponse = await fetch(
+            `https://public-api.birdeye.so/public/holder_count?address=${address}`,
+            {
+                headers: {
+                    'x-api-key': process.env.BIRDEYE_API_KEY,
+                }
             }
-        }
+        );
+        const holderData = await holderResponse.json();
+        console.log('Birdeye Holder Data:', holderData);
 
         return {
             success: true,
             data: {
-                liquidity: totalLiquidity,
-                volume: totalVolume,
-                holders: holders,
-                price: price,
-                pairs: poolsData.pairs || []
+                price: priceData.data?.value || 0,
+                priceChange24h: priceData.data?.priceChange24h || 0,
+                volume24h: volumeData.data?.volume24h || 0,
+                liquidity: volumeData.data?.liquidity || 0,
+                holders: holderData.data?.holder_count || 0,
+                marketCap: volumeData.data?.marketCap || 0,
+                poolCount: volumeData.data?.poolCount || 0
             }
         };
     } catch (error) {
-        console.error('DexScreener API Error:', error);
+        console.error('Birdeye API Error:', error);
         return {
             success: false,
             error: error.message
@@ -73,17 +74,7 @@ async function fetchHeliusTokenData(address) {
     try {
         console.log('Fetching Helius data for:', address);
         const response = await fetch(
-            `https://api.helius.xyz/v0/tokens/metadata?api-key=${process.env.HELIUS_API_KEY}`,
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    mintAccounts: [address],
-                    includeOffChain: true
-                })
-            }
+            `https://api.helius.xyz/v0/token-metadata?api-key=${process.env.HELIUS_API_KEY}&query=${address}`
         );
         const data = await response.json();
         console.log('Helius Raw Response:', data);
@@ -95,63 +86,47 @@ async function fetchHeliusTokenData(address) {
 }
 
 function calculateLiquidityScore(tokenData) {
-    console.log('Calculating liquidity score for:', tokenData);
     const liquidity = tokenData?.data?.liquidity || 0;
-    if (liquidity > 1000000) return 90;
+    if (liquidity > 500000) return 90; // Very high liquidity
     if (liquidity > 100000) return 80;
-    if (liquidity > 10000) return 70;
-    if (liquidity > 1000) return 60;
-    return 50;
+    if (liquidity > 50000) return 70;
+    if (liquidity > 10000) return 60;
+    return Math.max(50, Math.min(59, Math.floor((liquidity / 10000) * 59)));
 }
 
 function calculateVolumeScore(tokenData) {
-    console.log('Calculating volume score for:', tokenData);
-    const volume = tokenData?.data?.volume || 0;
+    const volume = tokenData?.data?.volume24h || 0;
     if (volume > 1000000) return 90;
     if (volume > 100000) return 80;
     if (volume > 10000) return 70;
     if (volume > 1000) return 60;
-    return 50;
+    return Math.max(50, Math.min(59, Math.floor((volume / 1000) * 59)));
 }
 
 function calculateHolderScore(tokenData) {
-    console.log('Calculating holder score for:', tokenData);
     const holders = tokenData?.data?.holders || 0;
-    if (holders > 10000) return 90;
+    if (holders > 5000) return 90;
     if (holders > 1000) return 80;
-    if (holders > 100) return 70;
-    if (holders > 10) return 60;
-    return 50;
+    if (holders > 500) return 70;
+    if (holders > 100) return 60;
+    return Math.max(50, Math.min(59, Math.floor((holders / 100) * 59)));
 }
 
-function calculatePairScore(tokenData) {
-    const pairs = tokenData?.data?.pairs || [];
-    const pairCount = pairs.length;
-    if (pairCount >= 5) return 90;
-    if (pairCount >= 3) return 80;
-    if (pairCount >= 2) return 70;
-    if (pairCount >= 1) return 60;
-    return 50;
+function calculateMarketCapScore(tokenData) {
+    const marketCap = tokenData?.data?.marketCap || 0;
+    if (marketCap > 10000000) return 90;
+    if (marketCap > 1000000) return 80;
+    if (marketCap > 100000) return 70;
+    if (marketCap > 10000) return 60;
+    return Math.max(50, Math.min(59, Math.floor((marketCap / 10000) * 59)));
 }
 
-function calculateSocialScore(heliusData) {
-    const metadata = heliusData?.[0];
-    if (!metadata) return 50;
-    
-    let score = 50;
-    
-    if (metadata.offChainMetadata) {
-        const { description, image, externalUrl } = metadata.offChainMetadata;
-        if (description) score += 10;
-        if (image) score += 10;
-        if (externalUrl) score += 10;
-    }
-
-    if (metadata.onChainData && metadata.onChainData.data) {
-        score += 20;
-    }
-    
-    return Math.min(score, 100);
+function getSniffMessage(score) {
+    if (score >= 90) return "WOOF! This one's a potential moonshot! 🚀🐕";
+    if (score >= 80) return "Strong scent, looking promising! 🐾";
+    if (score >= 70) return "Good boy vibes detected! 🦴";
+    if (score >= 60) return "Decent sniff, might be worth watching! 🐕";
+    return "Exercise caution, something smells fishy! 🐟";
 }
 
 app.post('/analyze', async (req, res) => {
@@ -163,58 +138,49 @@ app.post('/analyze', async (req, res) => {
         try {
             new web3.PublicKey(address);
         } catch (error) {
-            console.error('Invalid address:', error);
             return res.status(400).json({ error: 'Invalid Solana address' });
         }
 
-        const [dexData, heliusData] = await Promise.all([
-            fetchBirdeyeTokenData(address),
-            fetchHeliusTokenData(address)
-        ]);
+        const birdeyeData = await fetchBirdeyeTokenData(address);
+        console.log('Full API Data:', { birdeyeData });
 
-        console.log('Full API Data:', { dexData, heliusData });
-
-        const liquidityScore = calculateLiquidityScore(dexData);
-        const volumeScore = calculateVolumeScore(dexData);
-        const holderScore = calculateHolderScore(dexData);
-        const pairScore = calculatePairScore(dexData);
-        const socialScore = calculateSocialScore(heliusData);
+        const liquidityScore = calculateLiquidityScore(birdeyeData);
+        const volumeScore = calculateVolumeScore(birdeyeData);
+        const holderScore = calculateHolderScore(birdeyeData);
+        const marketCapScore = calculateMarketCapScore(birdeyeData);
 
         const overallScore = Math.round(
-            (liquidityScore * 0.25) +
-            (volumeScore * 0.25) +
+            (liquidityScore * 0.3) +
+            (volumeScore * 0.3) +
             (holderScore * 0.2) +
-            (pairScore * 0.15) +
-            (socialScore * 0.15)
+            (marketCapScore * 0.2)
         );
 
         const analysis = {
             score: overallScore,
+            message: getSniffMessage(overallScore),
             metrics: {
                 liquidityDepth: {
                     score: liquidityScore,
-                    description: `Liquidity depth: $${(dexData?.data?.liquidity || 0).toLocaleString()}`
+                    description: `Liquidity depth: $${(birdeyeData?.data?.liquidity || 0).toLocaleString()}`
                 },
                 holderDistribution: {
                     score: holderScore,
-                    description: `Total holders: ${(dexData?.data?.holders || 0).toLocaleString()}`
+                    description: `Total holders: ${(birdeyeData?.data?.holders || 0).toLocaleString()}`
                 },
                 volumeMomentum: {
                     score: volumeScore,
-                    description: `24h volume: $${(dexData?.data?.volume || 0).toLocaleString()}`
+                    description: `24h volume: $${(birdeyeData?.data?.volume24h || 0).toLocaleString()}`
                 },
-                dexPairs: {
-                    score: pairScore,
-                    description: `Active DEX pairs: ${(dexData?.data?.pairs || []).length}`
-                },
-                socialMetrics: {
-                    score: socialScore,
-                    description: `Token metadata and social presence`
+                marketMetrics: {
+                    score: marketCapScore,
+                    description: `Market Cap: $${(birdeyeData?.data?.marketCap || 0).toLocaleString()}`
                 }
             },
             tokenData: {
-                price: dexData?.data?.price || 0,
-                pairs: dexData?.data?.pairs || []
+                price: birdeyeData?.data?.price || 0,
+                priceChange24h: birdeyeData?.data?.priceChange24h || 0,
+                poolCount: birdeyeData?.data?.poolCount || 0
             }
         };
 
