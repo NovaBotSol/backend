@@ -9,60 +9,73 @@ dotenv.config();
 app.use(cors());
 app.use(express.json());
 
-async function fetchBirdeyeTokenData(address) {
+async function fetchTokenData(address) {
     try {
-        console.log('Fetching Birdeye data for:', address);
+        console.log('Fetching Jupiter data for:', address);
 
-        // Get price data
+        // Get token info from Jupiter
         const response = await fetch(
-            `https://public-api.birdeye.so/public/price?address=${address}`,
-            {
-                headers: {
-                    'x-api-key': process.env.BIRDEYE_API_KEY,
-                }
-            }
+            `https://price.jup.ag/v4/token/${address}`
         );
         const priceData = await response.json();
-        console.log('Birdeye Price Data:', priceData);
+        console.log('Jupiter Price Data:', priceData);
 
-        // Get liquidity and volume data
-        const volumeResponse = await fetch(
-            `https://public-api.birdeye.so/public/pool_summary?token_address=${address}`,
-            {
-                headers: {
-                    'x-api-key': process.env.BIRDEYE_API_KEY,
-                }
-            }
+        // Get token metadata from Jupiter
+        const metaResponse = await fetch(
+            `https://token.jup.ag/all`
         );
-        const volumeData = await volumeResponse.json();
-        console.log('Birdeye Volume Data:', volumeData);
+        const metaData = await metaResponse.json();
+        console.log('Jupiter Token List Data:', metaData);
 
-        // Get holder data
-        const holderResponse = await fetch(
-            `https://public-api.birdeye.so/public/holder_count?address=${address}`,
-            {
-                headers: {
-                    'x-api-key': process.env.BIRDEYE_API_KEY,
-                }
-            }
+        // Find token in metadata
+        const tokenInfo = metaData.tokens.find(t => t.address === address);
+        console.log('Token Info:', tokenInfo);
+
+        // Get raydium pools
+        const poolsResponse = await fetch(
+            `https://api.raydium.io/v2/main/pairs`
         );
-        const holderData = await holderResponse.json();
-        console.log('Birdeye Holder Data:', holderData);
+        const poolsData = await poolsResponse.json();
+        console.log('Raydium Pools Data:', poolsData);
+
+        // Find relevant pools
+        const relevantPools = poolsData.filter(pool => 
+            pool.baseMint === address || pool.quoteMint === address
+        );
+
+        // Calculate total liquidity and volume
+        let totalLiquidity = 0;
+        let totalVolume = 0;
+        relevantPools.forEach(pool => {
+            totalLiquidity += parseFloat(pool.liquidity || 0);
+            totalVolume += parseFloat(pool.volume24h || 0);
+        });
 
         return {
             success: true,
             data: {
-                price: priceData.data?.value || 0,
-                priceChange24h: priceData.data?.priceChange24h || 0,
-                volume24h: volumeData.data?.volume24h || 0,
-                liquidity: volumeData.data?.liquidity || 0,
-                holders: holderData.data?.holder_count || 0,
-                marketCap: volumeData.data?.marketCap || 0,
-                poolCount: volumeData.data?.poolCount || 0
+                price: priceData.data.price || 0,
+                volume24h: totalVolume,
+                liquidity: totalLiquidity,
+                holders: tokenInfo?.holder_count || 0,
+                marketCap: (priceData.data.price || 0) * (tokenInfo?.supply || 0),
+                poolCount: relevantPools.length,
+                tokenInfo: {
+                    name: tokenInfo?.name,
+                    symbol: tokenInfo?.symbol,
+                    decimals: tokenInfo?.decimals,
+                    totalSupply: tokenInfo?.supply
+                },
+                pools: relevantPools.map(pool => ({
+                    address: pool.ammId,
+                    liquidity: pool.liquidity,
+                    volume24h: pool.volume24h,
+                    price: pool.price
+                }))
             }
         };
     } catch (error) {
-        console.error('Birdeye API Error:', error);
+        console.error('API Error:', error);
         return {
             success: false,
             error: error.message
@@ -70,24 +83,9 @@ async function fetchBirdeyeTokenData(address) {
     }
 }
 
-async function fetchHeliusTokenData(address) {
-    try {
-        console.log('Fetching Helius data for:', address);
-        const response = await fetch(
-            `https://api.helius.xyz/v0/token-metadata?api-key=${process.env.HELIUS_API_KEY}&query=${address}`
-        );
-        const data = await response.json();
-        console.log('Helius Raw Response:', data);
-        return data;
-    } catch (error) {
-        console.error('Helius API Error:', error);
-        return null;
-    }
-}
-
 function calculateLiquidityScore(tokenData) {
     const liquidity = tokenData?.data?.liquidity || 0;
-    if (liquidity > 500000) return 90; // Very high liquidity
+    if (liquidity > 500000) return 90;
     if (liquidity > 100000) return 80;
     if (liquidity > 50000) return 70;
     if (liquidity > 10000) return 60;
@@ -103,13 +101,12 @@ function calculateVolumeScore(tokenData) {
     return Math.max(50, Math.min(59, Math.floor((volume / 1000) * 59)));
 }
 
-function calculateHolderScore(tokenData) {
-    const holders = tokenData?.data?.holders || 0;
-    if (holders > 5000) return 90;
-    if (holders > 1000) return 80;
-    if (holders > 500) return 70;
-    if (holders > 100) return 60;
-    return Math.max(50, Math.min(59, Math.floor((holders / 100) * 59)));
+function calculatePoolScore(tokenData) {
+    const poolCount = tokenData?.data?.poolCount || 0;
+    if (poolCount >= 3) return 90;
+    if (poolCount === 2) return 80;
+    if (poolCount === 1) return 70;
+    return 50;
 }
 
 function calculateMarketCapScore(tokenData) {
@@ -141,18 +138,18 @@ app.post('/analyze', async (req, res) => {
             return res.status(400).json({ error: 'Invalid Solana address' });
         }
 
-        const birdeyeData = await fetchBirdeyeTokenData(address);
-        console.log('Full API Data:', { birdeyeData });
+        const tokenData = await fetchTokenData(address);
+        console.log('Full API Data:', { tokenData });
 
-        const liquidityScore = calculateLiquidityScore(birdeyeData);
-        const volumeScore = calculateVolumeScore(birdeyeData);
-        const holderScore = calculateHolderScore(birdeyeData);
-        const marketCapScore = calculateMarketCapScore(birdeyeData);
+        const liquidityScore = calculateLiquidityScore(tokenData);
+        const volumeScore = calculateVolumeScore(tokenData);
+        const poolScore = calculatePoolScore(tokenData);
+        const marketCapScore = calculateMarketCapScore(tokenData);
 
         const overallScore = Math.round(
             (liquidityScore * 0.3) +
             (volumeScore * 0.3) +
-            (holderScore * 0.2) +
+            (poolScore * 0.2) +
             (marketCapScore * 0.2)
         );
 
@@ -162,25 +159,27 @@ app.post('/analyze', async (req, res) => {
             metrics: {
                 liquidityDepth: {
                     score: liquidityScore,
-                    description: `Liquidity depth: $${(birdeyeData?.data?.liquidity || 0).toLocaleString()}`
+                    description: `Liquidity depth: $${(tokenData?.data?.liquidity || 0).toLocaleString()}`
                 },
-                holderDistribution: {
-                    score: holderScore,
-                    description: `Total holders: ${(birdeyeData?.data?.holders || 0).toLocaleString()}`
+                poolDiversity: {
+                    score: poolScore,
+                    description: `Active pools: ${(tokenData?.data?.poolCount || 0)}`
                 },
                 volumeMomentum: {
                     score: volumeScore,
-                    description: `24h volume: $${(birdeyeData?.data?.volume24h || 0).toLocaleString()}`
+                    description: `24h volume: $${(tokenData?.data?.volume24h || 0).toLocaleString()}`
                 },
                 marketMetrics: {
                     score: marketCapScore,
-                    description: `Market Cap: $${(birdeyeData?.data?.marketCap || 0).toLocaleString()}`
+                    description: `Market Cap: $${(tokenData?.data?.marketCap || 0).toLocaleString()}`
                 }
             },
             tokenData: {
-                price: birdeyeData?.data?.price || 0,
-                priceChange24h: birdeyeData?.data?.priceChange24h || 0,
-                poolCount: birdeyeData?.data?.poolCount || 0
+                name: tokenData?.data?.tokenInfo?.name,
+                symbol: tokenData?.data?.tokenInfo?.symbol,
+                price: tokenData?.data?.price || 0,
+                totalSupply: tokenData?.data?.tokenInfo?.totalSupply,
+                pools: tokenData?.data?.pools || []
             }
         };
 
